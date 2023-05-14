@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import socket
 import sys
@@ -8,10 +9,10 @@ import time
 import hashlib
 import requests
 
+import urllib.request
 from urllib.parse import urlparse
 from http.client import HTTPConnection
-
-
+cached_urls = {}
 class BadRequestException(Exception):
     pass
 
@@ -70,105 +71,19 @@ class HttpRequest:
         # The request is valid
         return True
 
-class Cache:
-    def __init__(self):
-        self.store_path = './cache/'
-
-    def check_cache(self, req_to_check):
-        print("Check cache for request here???")
-
-    def cache_request(self, req_to_cache):
-        print("Write response from server to file for cache")
-
-    def do_conditional_get(self):
-        print("!!!Making conditional get for cached web-pages!!!")
-        last_modified = None
-
-        while True:
-            # Send an HTTP request with the If-Modified-Since header
-            headers = {}
-            if last_modified:
-                headers['If-Modified-Since'] = last_modified
-            response = ""
-            #requests.get(url, headers=headers)
-
-            # Check if the response is a 304 Not Modified status code
-            if response.status_code == 304:
-                print('Resource not modified since', last_modified)
-                time.sleep(180)  # Wait for 180 seconds before checking again
-                continue
-
-            # Parse the Last-Modified header from the response
-            last_modified = response.headers.get('Last-Modified')
-
-            # Cache the response data here
-            # ...
-
-            print('Resource modified on', last_modified)
-
-            time.sleep(180)  # Wait for 180 seconds before checking again
-
-
-
-
-def do_process(client_socket, request, request_bytes):
-    cache = Cache()
-    fullurl = request.fullurl
-    filename = generate_filename(fullurl)
-
-    if filename:
-        print(filename)
-
-    filetouse = cache.store_path + filename
-    print(filetouse)
-    if os.path.exists(filetouse):
-        f = open(filetouse[1:], "r")
-        outputdata = f.readlines()
-        # ProxyServer finds a cache hit and generates a response message
-        client_socket.send("HTTP/1.0 200 OK\r\n")
-        client_socket.send("Content-Type:text/html\r\n")
-        for data in outputdata:
-            client_socket.send(data)
-        print("!!!!READ FROM CACHE!!!!")
-    else:
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Before sending check cache here for content requested
-        # modify request_bytes to be conditional get
-        # If-Modified-Since two minutes ago
-        server_socket.connect((request.url, request.port))
-        server_socket.send(request_bytes)
-        response = b''
-        while True:
-            data = server_socket.recv(4096)
-            if not data:
-                break
-            response += data
-            # Create a new file in the cache for the requested file.
-
-            # Also send the response in the buffer to client socket and the
-            # corresponding file in the cache
-        # do not write the response to the file
-        print(response)
-        server_socket.close()
-        tmpFile = open(filetouse, "wb")
-        for data in response:
-            tmpFile.write(data)
-        client_socket.sendall(response)
-
-
-    client_socket.close()  # Close the client and the server sockets
-
-
-
 def handle_client(client_socket):
     # Receive data from the client
     try:
         request_bytes = client_socket.recv(4096) + b'\r\n'
         request_bytes = request_bytes.decode().replace('HTTP/1.1', 'HTTP/1.0').replace('\r\nConnection: keep-alive', '').replace('\r\nUpgrade-Insecure-Requests: 1', '').encode()
-        print(request_bytes.decode())
-        print(request_bytes)
+        # print(request_bytes.decode())
+
+
         HttpRequest.verify_valid_http_request(request_bytes.decode())
+        #I know full request is validated here
         request = HttpRequest(request_bytes.decode())
+        handle_request(client_socket, request_bytes.decode(), request_bytes)
+
 
 
     except BadRequestException:
@@ -187,30 +102,136 @@ def handle_client(client_socket):
 
     print(request.__dict__)
 
-    do_process(client_socket, request, request_bytes)
 
-def generate_filename(url):
-    # Encode the URL as UTF-8 and hash it using SHA-256
-    url_bytes = url.encode('utf-8')
-    hash_bytes = hashlib.sha256(url_bytes).digest()
-    # Convert the hash bytes to a hexadecimal string
-    hash_hex = hash_bytes.hex()
-    # Add a file extension to the hexadecimal string and return it as the filename
-    return hash_hex + '.html'
 
-def write_file(url, filename):
-    # Send an HTTP request to fetch the webpage
-    HTTPConnection._http_vsn_str = 'HTTP/1.0'
-    response = requests.get(url)
-    # Open a file for writing the webpage bytes
-    if response.status_code == "200":
-        with open(filename, 'wb') as f:
-            # Write the webpage bytes to the file
-            f.write(response.content)
+
+# Handle incoming requests
+def handle_request(conn, request, request_bytes):
+    method, path, version, headers = parse_request(request)
+    httprequest = HttpRequest(request)
+    if method == 'GET':
+        cache_content = get_from_cache(path)
+        if cache_content:
+            print("Returning from cache...!!!CACHE HIT!!!")
+            conn.sendall(cache_content)
+        else:
+            print("")
+            content = forward_to_server(method, path, version, headers, httprequest, request_bytes)
+            save_to_cache(path, content)
+            conn.sendall(content)
+    else:
+        # Only handle GET requests
+        conn.sendall(b'HTTP/1.0 405 Method Not Allowed\r\n\r\n')
+    conn.close()
+
+# Parse the incoming request
+def parse_request(request):
+    lines = request.strip().split('\r\n')
+    method, path, version = lines[0].split()
+    headers = {}
+    for line in lines[1:]:
+        name, value = line.split(': ', 1)
+        headers[name.lower()] = value
+    return method, path, version, headers
+
+# Get content from cache if available
+def get_from_cache(path):
+    cache_filename = hashlib.md5(path.encode()).hexdigest()
+    cache_filename = os.path.join("./cache/", cache_filename)
+
+    try:
+        with open(cache_filename, 'rb') as f:
+            print("--------FILE FOUND_______")
+            return f.read()
+    except FileNotFoundError:
+
+        return None
+    # if path in cached_urls:
+        # cache_filename = cached_urls[path]
+
+
+# Forward the request to the server
+def forward_to_server(method, path, version, headers, httprequest, request_bytes):
+    # Connect to the server
+
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.connect((httprequest.url, httprequest.port))
+
+    # Forward the request
+    request_line = f"{method} {path} {version}\r\n"
+    header_lines = ''.join(f"{name}: {value}\r\n" for name, value in headers.items())
+    request = request_line + header_lines + "\r\n"
+    server_socket.sendall(request_bytes)
+
+    # Get the response
+    response = b''
+    while True:
+        data = server_socket.recv(1024)
+        if not data:
+            break
+        response += data
+
+    # Close the connection to the server
+    server_socket.close()
+
+    return response
+
+# Save content to cache
+def save_to_cache(path, content):
+    cache_filename = hashlib.md5(path.encode()).hexdigest()
+    cache_filename = os.path.join("./cache/", cache_filename)
+
+    with open(cache_filename, 'wb') as f:
+        print("------CACHING-----" + path)
+        f.write(content)
+    cached_urls[path] = cache_filename
+# if __name__ == '__main__':
+#     start_server()
+def setup_conditional_get_request(url):
+    # construct a datetime object representing the time two minutes ago
+    print("CAlled at least once")
+    two_minutes_ago = datetime.datetime.now() - datetime.timedelta(second=10)
+
+    # convert the datetime object to a string in the format specified by the HTTP standard
+    # e.g. "Tue, 15 Nov 1994 08:12:31 GMT"
+    modified_since = two_minutes_ago.strftime('%a, %d %b %Y %H:%M:%S GMT')
+
+    # create a request object with the URL and the If-Modified-Since header
+    request = urllib.request.Request(url)
+    request.add_header('If-Modified-Since', modified_since)
+
+    return request
+
+def check_for_webpage_updates():
+    while True:
+        print("HELLO FROM THE OUTSIDE")
+
+        for url, filename in cached_urls.items():
+            print(cached_urls.items())
+            print("Right before")
+            request = setup_conditional_get_request(url)
+            try:
+
+                with urllib.request.urlopen(request) as response:
+                    if response.status == 200:
+                        content = response.read()
+                        with open(filename, 'wb') as f:
+                            f.write(content)
+                            print(f"Saved {url} to {filename}")
+                    elif response.status == 304:
+                        print(f"{url} not modified since last checked")
+            except urllib.error.URLError as e:
+                print(f"Error requesting {url}: {e.reason}")
+
+        time.sleep(10)
+
+
 
 
 def main():
     # Create a listening socket
+
+
     proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     proxy_socket.bind(("localhost", 8080))
     proxy_socket.listen(5)
@@ -221,8 +242,12 @@ def main():
         print("connected")
 
         # Create a new thread to handle the client request
-        client_thread = threading.Thread(target=handle_client, args=(client_socket,))
+        # update_thread = threading.Thread(target=check_for_webpage_updates, daemon=True)
+        # update_thread.start()
+
+        client_thread = threading.Thread(target=handle_client, args=(client_socket,), daemon=True)
         client_thread.start()
+
 
 
 if __name__ == '__main__':
