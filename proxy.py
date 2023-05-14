@@ -185,8 +185,7 @@ def save_to_cache(path, content):
         print("------CACHING-----" + path)
         f.write(content)
     cached_urls[path] = cache_filename
-# if __name__ == '__main__':
-#     start_server()
+
 def setup_conditional_get_request(url):
     # construct a datetime object representing the time two minutes ago
     print("CAlled at least once")
@@ -240,10 +239,6 @@ def main():
         # Accept a client connection
         client_socket, client_address = proxy_socket.accept()
         print("connected")
-
-        # Create a new thread to handle the client request
-        # update_thread = threading.Thread(target=check_for_webpage_updates, daemon=True)
-        # update_thread.start()
 
         client_thread = threading.Thread(target=handle_client, args=(client_socket,), daemon=True)
         client_thread.start()
